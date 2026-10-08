@@ -31,7 +31,7 @@
     announceToScreenReader
 */
 
-/* global showZoomOverlay */
+/* global showZoomOverlay, ManagedTimer */
 
 /*
    Global locations
@@ -182,6 +182,43 @@ class Blocks {
         /** Track the time with mouse down. */
         this.mouseDownTime = 0;
         this.longPressTimeout = null;
+        if (typeof ManagedTimer !== "undefined") {
+            this._timerManager = new ManagedTimer();
+        } else if (typeof require !== "undefined") {
+            try {
+                const ManagedTimerCtor = require("./utils/ManagedTimer");
+                this._timerManager = new ManagedTimerCtor();
+            } catch (e) {
+                this._timerManager = null;
+            }
+        } else {
+            this._timerManager = null;
+        }
+
+        this.setTimeout = (callback, delay) => {
+            if (this._timerManager !== null) {
+                return this._timerManager.setTimeout(callback, delay);
+            }
+            return setTimeout(callback, delay);
+        };
+
+        this.clearTimeout = id => {
+            if (id === null || id === undefined) {
+                return false;
+            }
+            if (this._timerManager !== null) {
+                return this._timerManager.clearTimeout(id);
+            }
+            clearTimeout(id);
+            return true;
+        };
+
+        this.clearLongPressTimeout = () => {
+            if (this.longPressTimeout !== null) {
+                this.clearTimeout(this.longPressTimeout);
+                this.longPressTimeout = null;
+            }
+        };
 
         /** Paste offset is used to ensure pasted blocks don't overlap. */
         this.pasteDx = 0;
@@ -499,7 +536,7 @@ class Blocks {
             }
 
             this.findStacks();
-            for (const stack in this.stackList) {
+            for (const stack of Object.keys(this.stackList)) {
                 this.adjustDocks(this.stackList[stack], true);
             }
 
@@ -513,7 +550,7 @@ class Blocks {
             /** We reset the protoblock scale on the palettes, but don't */
             /** modify the palettes themselves. */
             for (palette in this.activity.palettes.dict) {
-                for (const blk in this.activity.palettes.dict[palette].protoList) {
+                for (const blk of Object.keys(this.activity.palettes.dict[palette].protoList)) {
                     this.activity.palettes.dict[palette].protoList[blk].scale = scale;
                 }
             }
@@ -1381,7 +1418,7 @@ class Blocks {
                                     protoblock.name === "nameddo" &&
                                     protoblock.defaults[0] === that.blockList[oldBlock].value
                                 ) {
-                                    setTimeout(() => {
+                                    that.setTimeout(() => {
                                         blockPalette.remove(
                                             protoblock,
                                             that.blockList[oldBlock].value
@@ -3749,7 +3786,7 @@ class Blocks {
             const namedBlocks = new Set(["nameddo", "namedcalc", "nameddoArg", "namedcalcArg"]);
 
             /** Update the blocks, do->oldName should be do->newName */
-            for (const blk in this.blockList) {
+            for (const blk of Object.keys(this.blockList)) {
                 if (this.blockList[blk].trash) {
                     continue;
                 }
@@ -4661,6 +4698,10 @@ class Blocks {
             }
 
             const c2v = this.blockList[c2].value;
+            if (!(c1v > 0 && c2v > 0)) {
+                return;
+            }
+
             for (let i = 0; i < this.blockList.length; i++) {
                 if (this.blockList[i].trash) continue;
                 if (["setbpm3", "setmasterbpm2"].includes(this.blockList[i].name)) {
@@ -4689,7 +4730,7 @@ class Blocks {
                     }
 
                     const b2v = this.blockList[b2].value;
-                    bnv *= ((b1v * c2v) / b2v) * c1v;
+                    bnv = (bnv * b1v * c2v) / (b2v * c1v);
 
                     this.blockList[bn].value = bnv;
                     this.updateBlockText(bn);
@@ -4731,10 +4772,7 @@ class Blocks {
          * @returns {void}
          */
         this.triggerLongPress = () => {
-            if (this.longPressTimeout !== null) {
-                clearTimeout(this.longPressTimeout);
-                this.longPressTimeout = null;
-            }
+            this.clearLongPressTimeout();
 
             this.inLongPress = true;
             piemenuBlockContext(this.blockList[this.activeBlock]);
@@ -4751,7 +4789,7 @@ class Blocks {
             }
 
             /** First, hide the palettes as they will need updating. */
-            for (const name in this.activity.palettes.dict) {
+            for (const name of Object.keys(this.activity.palettes.dict)) {
                 this.activity.palettes.dict[name].hideMenu(true);
             }
 
@@ -4884,9 +4922,17 @@ class Blocks {
                                 []
                             ];
                             break;
-                        default:
-                            blockItem = [b, [myBlock.name, { value: myBlock.value }], x, y, []];
+                        default: {
+                            const valObj = { value: myBlock.value };
+                            if (
+                                myBlock.manualAccidental !== undefined &&
+                                myBlock.manualAccidental !== null
+                            ) {
+                                valObj.manualAccidental = myBlock.manualAccidental;
+                            }
+                            blockItem = [b, [myBlock.name, valObj], x, y, []];
                             break;
+                        }
                     }
                 } else if (
                     [
@@ -4955,7 +5001,7 @@ class Blocks {
          * @returns boolean
          */
         this.findBlockInstance = blkName => {
-            for (const blk in this.blockList) {
+            for (const blk of Object.keys(this.blockList)) {
                 if (this.blockList[blk].name === blkName && !this.blockList[blk].trash) {
                     return true;
                 }
@@ -5771,7 +5817,7 @@ class Blocks {
                         // surface the failure the same way a real browser would),
                         // tell any listener synchronously via pubsub, the same
                         // channel "finishedLoading" already uses for success.
-                        setTimeout(() => {
+                        this.setTimeout(() => {
                             try {
                                 processChunk();
                             } catch (e) {
@@ -6227,7 +6273,11 @@ class Blocks {
                         postProcess = args => {
                             const thisBlock = args[0];
                             const value = args[1];
+                            const info = args[2];
                             that.blockList[thisBlock].value = value;
+                            if (info && info.manualAccidental !== undefined) {
+                                that.blockList[thisBlock].manualAccidental = info.manualAccidental;
+                            }
                             that.updateBlockText(thisBlock);
                         };
 
@@ -6236,7 +6286,7 @@ class Blocks {
                             blockOffset,
                             blkData[4],
                             postProcess,
-                            [thisBlock, value]
+                            [thisBlock, value, blkInfo[1]]
                         );
                         break;
                     case "drumname":
@@ -6703,7 +6753,7 @@ class Blocks {
 
                 /** Do a final check on the action and boxes palettes. */
                 let updatePalettes = false;
-                for (const blk in this.blockList) {
+                for (const blk of Object.keys(this.blockList)) {
                     if (!this.blockList[blk].trash && this.blockList[blk].name === "action") {
                         const myBlock = this.blockList[blk];
                         const c = myBlock.connections[1];
@@ -6731,7 +6781,7 @@ class Blocks {
                 }
 
                 updatePalettes = false;
-                for (const blk in this.blockList) {
+                for (const blk of Object.keys(this.blockList)) {
                     if (!this.blockList[blk].trash && this.blockList[blk].name === "storein") {
                         const myBlock = this.blockList[blk];
                         const c = myBlock.connections[1];
@@ -6896,7 +6946,7 @@ class Blocks {
             if (actionArg) {
                 const actionName = actionArg.value;
                 /** Look for any "orphan" action blocks. */
-                for (const blk in this.blockList) {
+                for (const blk of Object.keys(this.blockList)) {
                     const thisBlock = this.blockList[blk];
                     if (thisBlock.trash) continue;
 
@@ -7218,7 +7268,7 @@ class Blocks {
 
         this.sendStackToTrash = myBlock => {
             /** First, hide the palettes as they may need updating. */
-            for (const name in this.activity.palettes.dict) {
+            for (const name of Object.keys(this.activity.palettes.dict)) {
                 this.activity.palettes.dict[name].hideMenu(true);
             }
 
@@ -7259,7 +7309,7 @@ class Blocks {
             /** Disconnect block. */
             const parentBlock = myBlock.connections[0];
             if (parentBlock !== null) {
-                for (const c in this.blockList[parentBlock].connections) {
+                for (const c of Object.keys(this.blockList[parentBlock].connections)) {
                     if (this.blockList[parentBlock].connections[c] === thisBlock) {
                         this.blockList[parentBlock].connections[c] = null;
                         break;
@@ -7385,7 +7435,7 @@ class Blocks {
          * @returns {void}
          */
         this.clearParameterBlocks = () => {
-            for (const blk in this.blockList) {
+            for (const blk of Object.keys(this.blockList)) {
                 if (this.blockList[blk].protoblock.parameter && this.blockList[blk].text !== null) {
                     /** The audiofile block label is handled in block.js */
                     if (this.blockList[blk].name === "audiofile") {

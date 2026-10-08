@@ -718,6 +718,52 @@ describe("widgetWindows", () => {
         });
     });
 
+    describe("ARIA dialog and state semantics", () => {
+        test("frame is a focusable dialog labelled by its title element", () => {
+            const win = createTestWindow("My Widget");
+
+            expect(win._frame.getAttribute("tabindex")).toBe("-1");
+            expect(win._frame.getAttribute("aria-labelledby")).toBe(win._key + "WidgetID");
+        });
+
+        test("title bar and widget toolbar expose distinct toolbar roles", () => {
+            const win = createTestWindow();
+
+            expect(win._drag.getAttribute("role")).toBe("toolbar");
+            expect(win._toolbar.getAttribute("role")).toBe("toolbar");
+            expect(win._drag.getAttribute("aria-label")).not.toBe(
+                win._toolbar.getAttribute("aria-label")
+            );
+        });
+
+        test("maximize/restore keep the button aria-label in sync", () => {
+            const win = createTestWindow();
+
+            win._maximize();
+            expect(win._maxminButton.getAttribute("aria-label")).toBe("Restore");
+
+            win._restore();
+            expect(win._maxminButton.getAttribute("aria-label")).toBe("Maximize window");
+        });
+
+        test("rollup/unroll toggle aria-expanded and rename the roll button", () => {
+            const win = createTestWindow();
+
+            expect(win._rollButton.getAttribute("aria-expanded")).toBe("true");
+            expect(win._rollButton.getAttribute("aria-label")).toBe("Roll up window");
+
+            win._rollup();
+            expect(win._rollButton.getAttribute("aria-expanded")).toBe("false");
+            expect(win._rollButton.getAttribute("aria-label")).toBe("Expand window");
+            expect(win._rollButton.title).toBe("Expand");
+
+            win.unroll();
+            expect(win._rollButton.getAttribute("aria-expanded")).toBe("true");
+            expect(win._rollButton.getAttribute("aria-label")).toBe("Roll up window");
+            expect(win._rollButton.title).toBe("Minimize");
+        });
+    });
+
     describe("updateTitle", () => {
         test("updates the title element textContent", () => {
             const win = createTestWindow("Old Title");
@@ -1050,6 +1096,83 @@ describe("widgetWindows", () => {
             }
         });
 
+        test("preserves focus when clicking a widget pie menu", () => {
+            const pieMenu = document.createElement("div");
+            pieMenu.id = "wheelDivptm";
+            const slice = document.createElement("span");
+            pieMenu.appendChild(slice);
+            document.body.appendChild(pieMenu);
+
+            try {
+                const win1 = createTestWindow("Window 1");
+                const win2 = createTestWindow("Window 2");
+
+                win1._frame.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+                expect(window.widgetWindows.focused).toBe(win1);
+
+                slice.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+
+                expect(window.widgetWindows.focused).toBe(win1);
+                expect(win1._frame.style.opacity).toBe("1");
+                expect(win1._frame.style.zIndex).toBe("10000");
+                expect(win2._frame.style.opacity).toBe("0.7");
+            } finally {
+                pieMenu.remove();
+            }
+        });
+
+        test("Escape leaves the focused window open while its pie menu is showing", () => {
+            const pieMenu = document.createElement("div");
+            pieMenu.id = "wheelDivptm";
+            document.body.appendChild(pieMenu);
+
+            try {
+                const win = createTestWindow("Window 1");
+                const closeSpy = jest.spyOn(win, "onclose");
+
+                const escape = () =>
+                    document.dispatchEvent(
+                        new KeyboardEvent("keydown", { key: "Escape", bubbles: true })
+                    );
+
+                pieMenu.style.display = "";
+                escape();
+                expect(closeSpy).not.toHaveBeenCalled();
+
+                pieMenu.style.display = "none";
+                escape();
+                expect(closeSpy).toHaveBeenCalledTimes(1);
+            } finally {
+                pieMenu.remove();
+            }
+        });
+
+        test("Escape leaves the focused window open while the Mode widget pie menu is showing", () => {
+            const wheelDiv = document.createElement("div");
+            wheelDiv.id = "wheelDiv";
+            document.body.appendChild(wheelDiv);
+
+            try {
+                const win = createTestWindow("Window 1");
+                const closeSpy = jest.spyOn(win, "onclose");
+
+                const escape = () =>
+                    document.dispatchEvent(
+                        new KeyboardEvent("keydown", { key: "Escape", bubbles: true })
+                    );
+
+                wheelDiv.style.display = "";
+                escape();
+                expect(closeSpy).not.toHaveBeenCalled();
+
+                wheelDiv.style.display = "none";
+                escape();
+                expect(closeSpy).toHaveBeenCalledTimes(1);
+            } finally {
+                wheelDiv.remove();
+            }
+        });
+
         test("Escape key closes only the currently focused window", () => {
             const win1 = createTestWindow("Window 1");
             const win2 = createTestWindow("Window 2");
@@ -1168,10 +1291,15 @@ describe("widgetWindows", () => {
             const win2 = createTestWindow("Win 2");
             window.widgetWindows.focused = win1;
 
+            win1._overlay(true);
+
             window.widgetWindows.hideAllWindows();
 
             expect(win1._frame.style.display).toBe("none");
             expect(win2._frame.style.display).toBe("none");
+            expect(win1._frame.style.zIndex).toBe("10");
+            expect(win1._overlayframe.style.zIndex).toBe("-1");
+            expect(win1._overlayframe.style.backgroundColor).toBe("transparent");
             expect(window.widgetWindows.focused).toBeNull();
         });
 

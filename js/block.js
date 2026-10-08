@@ -34,7 +34,7 @@
    splitSolfege, STANDARDBLOCKHEIGHT, TEXTX, TEXTY,
     updateTemperaments, VALUETEXTX, DEFAULTCHORD, base64Encode,
    VOICENAMES, WESTERN2EISOLFEGENAMES, _THIS_IS_TURTLE_BLOCKS_,
-   widgetWindows, Turtle
+   widgetWindows, Turtle, ManagedTimer
  */
 
 /*
@@ -166,6 +166,7 @@ class Block {
         this.loadComplete = false; // Has the block finished loading?
         this.label = null; // Editable textview in DOM.
         this.labelattr = null; // Editable textview in DOM.
+        this._boundExitKeyPressed = this._exitKeyPressed.bind(this);
         this.text = null; // A dynamically generated text label on block itself.
         this.value = null; // Value for number, text, and media blocks.
         this.privateData = null; // A block may have some private data,
@@ -218,6 +219,9 @@ class Block {
         // Don't trigger notes on top of each other.
         this._triggerLock = false;
 
+        // Manual accidental override from pitch pie menu (Issue #9003)
+        this.manualAccidental = null;
+
         // If we update the parameters of a meter block, we have extra
         // actions to attend to.
         this._check_meter_block = null;
@@ -230,6 +234,7 @@ class Block {
         this._trashHoverScaled = false;
         this._trashHoverGroupState = null;
         this._dragPointerDown = false;
+        this.accessibleElement = null;
     }
 
     /**
@@ -584,6 +589,7 @@ class Block {
         }
         this.label = null;
         this.labelattr = null;
+        this._removeAccessibleElement();
 
         if (this.container) {
             if (typeof this.container.removeAllEventListeners === "function") {
@@ -1961,6 +1967,7 @@ class Block {
 
         this.updateCache();
         this.activity.refreshCanvas();
+        this._removeAccessibleElement();
     }
 
     /**
@@ -2072,6 +2079,7 @@ class Block {
 
             this.updateCache();
             this.activity.refreshCanvas();
+            this._setupAccessibleElement();
         }
     }
 
@@ -2302,6 +2310,11 @@ class Block {
         const loadGeneration = this._thumbnailLoadGeneration;
 
         if (this.blocks.blockList[thisBlock].value === null && imagePath === null) {
+            this.removeChildBitmap("media");
+            this.imageBitmap = null;
+            this.image = "images/load-media.svg";
+            this.updateCache();
+            this._addImage();
             return;
         }
         const image = new Image();
@@ -2547,7 +2560,14 @@ class Block {
      */
     _doOpenMediaFromDevice(thisBlock) {
         const that = this;
-        const fileChooser = that.name === "media" ? docById("myMedia") : docById("audio");
+        let fileChooser;
+        if (that.name === "media") {
+            fileChooser = docById("myMedia");
+        } else if (that.name === "audiofile") {
+            fileChooser = docById("audioInput");
+        } else {
+            fileChooser = docById("myOpenAll");
+        }
 
         const __readerAction = () => {
             window.scroll(0, 0);
@@ -3070,11 +3090,20 @@ class Block {
             this.blocks.findDragGroup(this.connections[1]);
             for (let b = 0; b < this.blocks.dragGroup.length; b++) {
                 const blk = this.blocks.dragGroup[b];
-                this.blocks.blockList[blk].container.visible = collapse;
-                if (collapse) {
-                    this.blocks.blockList[blk].inCollapsed = false;
-                } else {
-                    this.blocks.blockList[blk].inCollapsed = true;
+                const targetBlock = this.blocks.blockList[blk];
+                if (targetBlock) {
+                    targetBlock.container.visible = collapse;
+                    if (collapse) {
+                        targetBlock.inCollapsed = false;
+                        if (typeof targetBlock._setupAccessibleElement === "function") {
+                            targetBlock._setupAccessibleElement();
+                        }
+                    } else {
+                        targetBlock.inCollapsed = true;
+                        if (typeof targetBlock._removeAccessibleElement === "function") {
+                            targetBlock._removeAccessibleElement();
+                        }
+                    }
                 }
             }
         }
@@ -3084,19 +3113,31 @@ class Block {
             this.blocks.findDragGroup(this.connections[2]);
             for (let b = 0; b < this.blocks.dragGroup.length; b++) {
                 const blk = this.blocks.dragGroup[b];
-                // Look to see if the local parent block is collapsed.
-                const parent = this.blocks.insideInlineCollapsibleBlock(blk);
-                if (parent === null || !this.blocks.blockList[parent].collapsed) {
-                    this.blocks.blockList[blk].container.visible = collapse;
-                    if (collapse) {
-                        this.blocks.blockList[blk].inCollapsed = false;
+                const targetBlock = this.blocks.blockList[blk];
+                if (targetBlock) {
+                    // Look to see if the local parent block is collapsed.
+                    const parent = this.blocks.insideInlineCollapsibleBlock(blk);
+                    if (parent === null || !this.blocks.blockList[parent].collapsed) {
+                        targetBlock.container.visible = collapse;
+                        if (collapse) {
+                            targetBlock.inCollapsed = false;
+                            if (typeof targetBlock._setupAccessibleElement === "function") {
+                                targetBlock._setupAccessibleElement();
+                            }
+                        } else {
+                            targetBlock.inCollapsed = true;
+                            if (typeof targetBlock._removeAccessibleElement === "function") {
+                                targetBlock._removeAccessibleElement();
+                            }
+                        }
                     } else {
-                        this.blocks.blockList[blk].inCollapsed = true;
+                        // Parent is collapsed, so keep hidden.
+                        targetBlock.container.visible = false;
+                        targetBlock.inCollapsed = true;
+                        if (typeof targetBlock._removeAccessibleElement === "function") {
+                            targetBlock._removeAccessibleElement();
+                        }
                     }
-                } else {
-                    // Parent is collapsed, so keep hidden.
-                    this.blocks.blockList[blk].container.visible = false;
-                    this.blocks.blockList[blk].inCollapsed = true;
                 }
             }
         }
@@ -3254,6 +3295,7 @@ class Block {
         const thisBlock = this.blockIndex;
 
         this._calculateBlockHitArea();
+        this._setupAccessibleElement();
 
         this.container.on("mouseover", () => {
             _getStatic("contextWheelDiv").style.display = "none";
@@ -3285,7 +3327,35 @@ class Block {
          */
         this.container.on("click", event => {
             that.activity.closeHelpfulWheel();
+            const _scheduleDelayedRun = topBlock => {
+                const runCmd = () => {
+                    that.activity.logo.runLogoCommands(topBlock);
+                    that.activity.toolbar.highlightStop(platformColor.stopIconcolor);
+                };
+                const timerManager =
+                    that.activity && that.activity.logo && that.activity.logo._timerManager;
+                if (timerManager && typeof timerManager.setTimeout === "function") {
+                    timerManager.setTimeout(runCmd, 250);
+                } else if (that.blocks && typeof that.blocks.setTimeout === "function") {
+                    that.blocks.setTimeout(runCmd, 250);
+                } else {
+                    setTimeout(runCmd, 250);
+                }
+            };
             // We might be able to check which button was clicked.
+            if (that._triggerLongPress) {
+                that._triggerLongPress = false;
+                if (
+                    event.nativeEvent &&
+                    typeof event.nativeEvent.stopImmediatePropagation === "function"
+                ) {
+                    event.nativeEvent.stopImmediatePropagation();
+                } else if (typeof event.stopPropagation === "function") {
+                    event.stopPropagation();
+                }
+                return;
+            }
+
             if ("nativeEvent" in event) {
                 if ("button" in event.nativeEvent && event.nativeEvent.button === 2) {
                     that.blocks.stageClick = true;
@@ -3302,10 +3372,7 @@ class Block {
                     if (that.activity.turtles.running()) {
                         that.activity.logo.doStopTurtles();
 
-                        setTimeout(() => {
-                            that.activity.logo.runLogoCommands(topBlock);
-                            that.activity.toolbar.highlightStop(platformColor.stopIconcolor);
-                        }, 250);
+                        _scheduleDelayedRun(topBlock);
                     } else {
                         that.activity.logo.runLogoCommands(topBlock);
                         that.activity.toolbar.highlightStop(platformColor.stopIconcolor);
@@ -3327,9 +3394,15 @@ class Block {
             }
 
             locked = true;
-            setTimeout(() => {
-                locked = false;
-            }, 500);
+            if (that.blocks && typeof that.blocks.setTimeout === "function") {
+                that.blocks.setTimeout(() => {
+                    locked = false;
+                }, 500);
+            } else {
+                setTimeout(() => {
+                    locked = false;
+                }, 500);
+            }
 
             hideDOMLabel();
             that._checkWidgets(false);
@@ -3360,10 +3433,7 @@ class Block {
                         if (that.activity.turtles.running()) {
                             that.activity.logo.doStopTurtles();
 
-                            setTimeout(() => {
-                                that.activity.logo.runLogoCommands(topBlk);
-                                that.activity.toolbar.highlightStop(platformColor.stopIconcolor);
-                            }, 250);
+                            _scheduleDelayedRun(topBlk);
                         } else {
                             that.activity.logo.runLogoCommands(topBlk);
                             that.activity.toolbar.highlightStop(platformColor.stopIconcolor);
@@ -3380,10 +3450,7 @@ class Block {
                     if (that.activity.turtles.running()) {
                         that.activity.logo.doStopTurtles();
 
-                        setTimeout(() => {
-                            that.activity.logo.runLogoCommands(topBlk);
-                            that.activity.toolbar.highlightStop(platformColor.stopIconcolor);
-                        }, 250);
+                        _scheduleDelayedRun(topBlk);
                     } else {
                         that.activity.logo.runLogoCommands(topBlk);
                         that.activity.toolbar.highlightStop(platformColor.stopIconcolor);
@@ -3411,11 +3478,18 @@ class Block {
             that.blocks.dragStartX = that.container.x;
             that.blocks.dragStartY = that.container.y;
 
-            that.blocks.longPressTimeout = setTimeout(() => {
+            const onLongPress = () => {
                 that.blocks.activeBlock = that.blockIndex;
                 that._triggerLongPress = true;
+                window._contextWheelIgnoreNextClick = true;
+                window._contextWheelIgnoreNextMouseUp = true;
                 that.blocks.triggerLongPress();
-            }, LONGPRESSTIME);
+            };
+            if (that.blocks && typeof that.blocks.setTimeout === "function") {
+                that.blocks.longPressTimeout = that.blocks.setTimeout(onLongPress, LONGPRESSTIME);
+            } else {
+                that.blocks.longPressTimeout = setTimeout(onLongPress, LONGPRESSTIME);
+            }
 
             //hide the trash when block is being collapse or expand
             const hasColExpBtns = this.collapseButtonBitmap && this.expandButtonBitmap;
@@ -3502,6 +3576,11 @@ class Block {
             // Prevent the browser's default drag behavior
             event.nativeEvent.preventDefault();
 
+            // A long press opens the context menu instead of starting a drag.
+            if (that._triggerLongPress || that.blocks.getLongPressStatus()) {
+                return;
+            }
+
             // Don't allow silence block to be dragged out of a note.
             if (that.name === "rest2") {
                 return;
@@ -3542,7 +3621,7 @@ class Block {
                 }
             } else {
                 // Make it easier to select text on mobile.
-                setTimeout(() => {
+                const checkMoved = () => {
                     moved =
                         Math.abs(event.stageX / that.activity.getStageScale() - that.original.x) +
                             Math.abs(
@@ -3550,7 +3629,12 @@ class Block {
                             ) >
                             20 && !window.hasMouse;
                     getInput = !moved;
-                }, 200);
+                };
+                if (that.blocks && typeof that.blocks.setTimeout === "function") {
+                    that.blocks.setTimeout(checkMoved, 200);
+                } else {
+                    setTimeout(checkMoved, 200);
+                }
             }
 
             const oldX = that.container.x;
@@ -3591,7 +3675,11 @@ class Block {
             }
 
             if (that.blocks.longPressTimeout !== null) {
-                clearTimeout(that.blocks.longPressTimeout);
+                if (typeof that.blocks.clearTimeout === "function") {
+                    that.blocks.clearTimeout(that.blocks.longPressTimeout);
+                } else {
+                    clearTimeout(that.blocks.longPressTimeout);
+                }
                 that.blocks.longPressTimeout = null;
                 that.blocks.clearLongPress();
             }
@@ -3683,7 +3771,11 @@ class Block {
             if (that._dragPointerDown) {
                 // eslint-disable-next-line eqeqeq
                 if (that.blocks.longPressTimeout != null) {
-                    clearTimeout(that.blocks.longPressTimeout);
+                    if (typeof that.blocks.clearTimeout === "function") {
+                        that.blocks.clearTimeout(that.blocks.longPressTimeout);
+                    } else {
+                        clearTimeout(that.blocks.longPressTimeout);
+                    }
                     that.blocks.longPressTimeout = null;
                 }
                 that.blocks.clearLongPress();
@@ -3697,7 +3789,11 @@ class Block {
             if (!that.blocks.getLongPressStatus()) {
                 that._mouseoutCallback(event, moved, haveClick, false, false);
             } else {
-                clearTimeout(that.blocks.longPressTimeout);
+                if (typeof that.blocks.clearTimeout === "function") {
+                    that.blocks.clearTimeout(that.blocks.longPressTimeout);
+                } else {
+                    clearTimeout(that.blocks.longPressTimeout);
+                }
                 that.blocks.longPressTimeout = null;
                 that.blocks.clearLongPress();
             }
@@ -3732,7 +3828,11 @@ class Block {
             if (!that.blocks.getLongPressStatus()) {
                 that._mouseoutCallback(event, moved, haveClick, false, true, _dragSpatialGridDirty);
             } else {
-                clearTimeout(that.blocks.longPressTimeout);
+                if (typeof that.blocks.clearTimeout === "function") {
+                    that.blocks.clearTimeout(that.blocks.longPressTimeout);
+                } else {
+                    clearTimeout(that.blocks.longPressTimeout);
+                }
                 that.blocks.longPressTimeout = null;
                 that.blocks.clearLongPress();
             }
@@ -3791,7 +3891,11 @@ class Block {
         }
 
         if (this.blocks.longPressTimeout !== null) {
-            clearTimeout(this.blocks.longPressTimeout);
+            if (typeof this.blocks.clearTimeout === "function") {
+                this.blocks.clearTimeout(this.blocks.longPressTimeout);
+            } else {
+                clearTimeout(this.blocks.longPressTimeout);
+            }
             this.blocks.longPressTimeout = null;
             this.blocks.clearLongPress();
         }
@@ -4789,11 +4893,16 @@ class Block {
             }
 
             // Firefox fix
-            setTimeout(() => {
+            const focusLabel = () => {
                 that.label.style.display = "";
                 that.label.focus();
                 focused = true;
-            }, 100);
+            };
+            if (this.blocks && typeof this.blocks.setTimeout === "function") {
+                this.blocks.setTimeout(focusLabel, 100);
+            } else {
+                setTimeout(focusLabel, 100);
+            }
         }
     }
 
@@ -4807,7 +4916,10 @@ class Block {
         if (["Enter", "Tab"].includes(event.key)) {
             this._labelChanged(true, false);
             event.preventDefault();
-            this.label.removeEventListener("keypress", this._exitKeyPressed);
+            this.label.removeEventListener(
+                "keypress",
+                this._boundExitKeyPressed || this._exitKeyPressed
+            );
             docById("labelDiv").classList.remove("hasKeyboard");
         }
     }
@@ -4939,6 +5051,9 @@ class Block {
         }
 
         c = this.connections[0];
+        // Capture the value the user actually typed before any collision resolution
+        // so the second action switch can always detect a user-initiated rename.
+        const typedActionValue = newValue;
         if (this.name === "text" && c !== null) {
             const cblock = this.blocks.blockList[c];
             let uniqueValue;
@@ -4946,22 +5061,28 @@ class Block {
                 case "action":
                     {
                         const isNameChanged = oldValue !== newValue;
-                        if (isNameChanged) {
+                        if (isNameChanged && commitLabelEdit) {
                             this.blocks.palettes.removeActionPrototype(oldValue);
                         }
 
-                        // Ensure new name is unique.
-                        const validatedName = this.blocks.findUniqueActionName(newValue, c);
-                        if (validatedName !== newValue) {
-                            newValue = validatedName;
-                            this.value = newValue;
-                            let label = this.value.toString();
-                            if (getTextWidth(label, "bold 20pt Sans") > TEXTWIDTH) {
-                                label = label.slice(0, STRINGLEN) + "...";
+                        // Ensure new name is unique upon committing the edit.
+                        if (commitLabelEdit) {
+                            const validatedName = this.blocks.findUniqueActionName(newValue, c);
+                            if (validatedName !== newValue) {
+                                // Notify the user that their chosen name was already taken.
+                                this.activity.errorMsg(
+                                    `${_("Renaming")} "${newValue}" ${_("to avoid name collision")}: "${validatedName}"`
+                                );
+                                newValue = validatedName;
+                                this.value = newValue;
+                                let label = this.value.toString();
+                                if (getTextWidth(label, "bold 20pt Sans") > TEXTWIDTH) {
+                                    label = label.slice(0, STRINGLEN) + "...";
+                                }
+                                this.text.text = label;
+                                this.label.value = newValue;
+                                this.updateCache();
                             }
-                            this.text.text = label;
-                            this.label.value = newValue;
-                            this.updateCache();
                         }
                     }
                     break;
@@ -5114,7 +5235,9 @@ class Block {
             switch (cblock.name) {
                 case "action":
                     {
-                        const isNameChanged = oldValue !== newValue;
+                        // Use typedActionValue so a collision-resolved rename (where the
+                        // resolved name equals oldValue) still triggers a palette refresh.
+                        const isNameChanged = oldValue !== typedActionValue;
                         if (isNameChanged && closeInput) {
                             this.blocks.renameDos(oldValue, newValue);
 
@@ -5223,6 +5346,157 @@ class Block {
             delete this._capturedInitialValue;
             delete this._capturedInitialText;
         }
+        this._updateAccessibleElement();
+    }
+
+    /**
+     * Get or create the accessible container for workspace blocks.
+     * @static
+     * @returns {HTMLElement|null}
+     */
+    static getAccessibleContainer() {
+        if (typeof document === "undefined" || !document.getElementById) {
+            return null;
+        }
+        let container = document.getElementById("accessibleBlocks");
+        if (!container && typeof document.createElement === "function") {
+            container = document.createElement("div");
+            container.id = "accessibleBlocks";
+            container.className = "visually-hidden";
+            container.setAttribute("role", "region");
+            container.setAttribute("aria-label", "Workspace Blocks");
+            container.style.cssText =
+                "position:absolute;left:-9999px;width:1px;height:1px;overflow:hidden;";
+            const parent = document.getElementById("canvasContainer") || document.body;
+            if (parent && typeof parent.appendChild === "function") {
+                parent.appendChild(container);
+            }
+        }
+        return container;
+    }
+
+    /**
+     * Get an accessible descriptive label for assistive technology.
+     * @returns {string}
+     */
+    getAccessibleLabel() {
+        const name =
+            (this.overrideName && this.name !== "outputtools" && this.overrideName) ||
+            (this.protoblock && this.protoblock.staticLabels && this.protoblock.staticLabels[0]) ||
+            this.name ||
+            "block";
+        if (
+            this.value !== null &&
+            this.value !== undefined &&
+            this.value !== "" &&
+            !(typeof this.value === "string" && this.value.startsWith("data:"))
+        ) {
+            return `${name}, value: ${this.value}`;
+        }
+        return `${name} block`;
+    }
+
+    /**
+     * Programmatically activate this block (simulates canvas click).
+     * @returns {void}
+     */
+    activate() {
+        if (!this.container) {
+            return;
+        }
+        const scale =
+            this.activity && typeof this.activity.getStageScale === "function"
+                ? this.activity.getStageScale()
+                : 1;
+        const event = {
+            type: "click",
+            stageX: ((this.container.x || 0) + 50) * scale,
+            stageY: ((this.container.y || 0) + 10) * scale,
+            nativeEvent: {}
+        };
+        if (typeof this.container.dispatchEvent === "function") {
+            this.container.dispatchEvent(event);
+        }
+    }
+
+    /**
+     * Set up an off-screen accessible mirror element for this block.
+     * @private
+     * @returns {HTMLElement|null}
+     */
+    _setupAccessibleElement() {
+        if (typeof document === "undefined" || !document.createElement) {
+            return null;
+        }
+        this._removeAccessibleElement();
+
+        const container = Block.getAccessibleContainer();
+        if (!container || typeof container.appendChild !== "function") {
+            return null;
+        }
+
+        const el = document.createElement("div");
+        el.setAttribute("role", "button");
+        el.setAttribute("tabindex", "0");
+        el.className = "accessible-workspace-block";
+        if (this.blockIndex !== -1 && this.blockIndex !== undefined) {
+            el.id = "accessible-block-" + this.blockIndex;
+        }
+
+        el.setAttribute("aria-label", this.getAccessibleLabel());
+
+        el.addEventListener("keydown", event => {
+            if (event.key === "Enter" || event.key === " " || event.key === "Spacebar") {
+                event.preventDefault();
+                event.stopPropagation();
+                this.activate();
+            } else if (event.key === "ArrowDown" || event.key === "ArrowRight") {
+                event.preventDefault();
+                const next = el.nextElementSibling;
+                if (next && typeof next.focus === "function") {
+                    next.focus();
+                }
+            } else if (event.key === "ArrowUp" || event.key === "ArrowLeft") {
+                event.preventDefault();
+                const prev = el.previousElementSibling;
+                if (prev && typeof prev.focus === "function") {
+                    prev.focus();
+                }
+            }
+        });
+
+        container.appendChild(el);
+        this.accessibleElement = el;
+        return el;
+    }
+
+    /**
+     * Remove the accessible mirror element from the DOM.
+     * @private
+     * @returns {void}
+     */
+    _removeAccessibleElement() {
+        if (this.accessibleElement) {
+            if (this.accessibleElement.parentNode) {
+                this.accessibleElement.parentNode.removeChild(this.accessibleElement);
+            }
+            this.accessibleElement = null;
+        }
+    }
+
+    /**
+     * Update the accessible mirror element's attributes.
+     * @private
+     * @returns {void}
+     */
+    _updateAccessibleElement() {
+        if (!this.accessibleElement) {
+            return;
+        }
+        if (this.blockIndex !== -1 && this.blockIndex !== undefined) {
+            this.accessibleElement.id = "accessible-block-" + this.blockIndex;
+        }
+        this.accessibleElement.setAttribute("aria-label", this.getAccessibleLabel());
     }
 }
 
